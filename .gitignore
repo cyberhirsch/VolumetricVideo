@@ -13,6 +13,9 @@
 # --- Research papers (heavy, copyrighted — keep local only) -------
 /docs/papers/
 
+# --- Personal / private drafts (keep local only) ------------------
+/docs/email_to_lukas_and_sebastian.md
+
 # --- Datasets, checkpoints, rendered results ----------------------
 /data/
 /results/
