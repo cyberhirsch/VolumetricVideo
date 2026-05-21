@@ -1,0 +1,15 @@
+configs:
+    - configs/base.yaml
+    - configs/models/gaussianth.yaml
+    - configs/datasets/enerf_outdoor/actor1_4_subseq.yaml
+
+runner_cfg:
+    epochs: 200
+    decay_epochs: 100
+    eval_ep: 20
+    save_ep: 100
+    save_latest_ep: 50
+    save_lim: 2
+
+# prettier-ignore
+exp_name: {{fileBasenameNoExtension}}

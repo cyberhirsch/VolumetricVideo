@@ -1,0 +1,53 @@
+# ============================================================
+#  Long Volumetric Video — TGH Reproduction
+# ============================================================
+
+# --- External upstream clones -------------------------------------
+# EasyVolcap and fast-gaussian-rasterization are cloned upstream
+# repositories (each with its own .git/). They are NOT tracked here.
+# The files this project contributes to EasyVolcap are mirrored in
+# tgh-plugin/ (tracked) — see README.md.
+/EasyVolcap/
+/fast-gaussian-rasterization/
+
+# --- Research papers (heavy, copyrighted — keep local only) -------
+/docs/papers/
+
+# --- Datasets, checkpoints, rendered results ----------------------
+/data/
+/results/
+/trained_model/
+/record/
+*.pt
+*.npz
+*.ply
+
+# --- Downloaded archives / wheels ---------------------------------
+*.zip
+*.tar
+*.tar.gz
+/wheels/
+example_dataset.zip
+
+# --- Logs / scratch -----------------------------------------------
+*.log
+/tmp/
+
+# --- Python -------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.so
+.ipynb_checkpoints/
+.venv/
+venv/
+.conda/
+
+# --- OS / editor --------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*~

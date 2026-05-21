@@ -1,0 +1,26 @@
+configs:
+    - configs/base.yaml
+    - configs/models/gaussianth.yaml
+    - configs/datasets/neural3dv/flame_salmon.yaml
+
+# Override sample ranges to match the 19 cameras (cam03 and cam17 absent in the
+# Neural3DV release) and the 1200-frame `flame_salmon_1` segment we extracted.
+dataloader_cfg:
+    dataset_cfg: &dataset_cfg
+        view_sample: [0, 19, 1]
+        frame_sample: [0, 1200, 1]
+
+val_dataloader_cfg:
+    dataset_cfg:
+        <<: *dataset_cfg
+        frame_sample: [0, 1200, 100]      # evaluate every 100th frame for speed
+    sampler_cfg:
+        view_sample: [0, 19, 6]           # every 6th camera at eval time
+
+# The temporal hierarchy needs to match the (normalized) duration. Default
+# `root_segment: 0.25` corresponds to the paper's S = 10 s on a 40 s sequence
+# (10/40 = 0.25), which is exactly the canonical Neural3DV flame_salmon
+# setup. Keep model defaults as-is.
+
+# prettier-ignore
+exp_name: {{fileBasenameNoExtension}}

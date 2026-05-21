@@ -1,0 +1,84 @@
+# Temporal Gaussian Hierarchy model configuration.
+# Reproduction of Xu et al., SIGGRAPH Asia 2024.
+
+dataloader_cfg: &dataloader_cfg
+    dataset_cfg: &dataset_cfg
+        n_rays: -1 # use the whole image
+        view_sample: [0, null, 1]
+    batch_sampler_cfg: &batch_sampler_cfg
+        batch_size: 1
+
+val_dataloader_cfg:
+    <<: *dataloader_cfg
+    dataset_cfg:
+        <<: *dataset_cfg
+
+runner_cfg:
+    visualizer_cfg:
+        types: ['RENDER', 'DEPTH', 'ALPHA']
+    optimizer_cfg:
+        lr: 0.0
+        eps: 1.e-15
+        lr_table:
+            _xyz: 0.00016
+            _t: 0.00016
+            _features_dc: 0.0025
+            _features_rest: 0.000125
+            _opacity: 0.05
+            _scaling: 0.005
+            _scaling_t: 0.001
+            _rotation_l: 0.001
+            _rotation_r: 0.001
+    scheduler_cfg:
+        type: NoopLR
+    epochs: 60
+    decay_epochs: 30
+    ep_iter: 500
+    save_latest_ep: 5
+    save_ep: 5
+    eval_ep: 5
+    log_interval: 1
+
+model_cfg:
+    chunkify_rays: False        # the sampler handles whole images
+    let_user_handle_input: True
+
+    sampler_cfg:
+        type: GaussianTHSampler
+        sh_deg: 3
+        num_levels: 9
+        root_segment: 0.25      # S, normalized fraction of the [0, 1] timeline
+        o_th: 0.05
+        segmentation: uniform
+        n_init_points: 131072
+        init_occ: 0.1
+        init_scale: 0.02
+        init_scale_t: 0.008    # ~one frame of normalized time; keeps Gaussians
+                               # temporally localized so the hierarchy populates
+                               # fine levels rather than collapsing to global
+
+        # Compact Appearance Model (Sec. 3.3) - paper defaults
+        compact_appearance: True
+        compact_grad_threshold: 1.0e-6
+        compact_lambda_h: 0.15
+        compact_check_every: 100
+
+        # Densification (3DGS-style adaptive control, adapted to 4D)
+        densify_from_iter: 500
+        densify_until_iter: 15000
+        densification_interval: 100
+        densify_grad_threshold: 2.0e-4
+        percent_dense: 0.01
+        min_opacity: 0.005
+        max_screen_size: 0.0
+        sh_update_iter: 1000
+
+    renderer_cfg:
+        type: NoopRenderer
+    network_cfg:
+        type: NoopNetwork
+
+    supervisor_cfg:
+        img_loss_type: L1
+        img_loss_weight: 0.8
+        ssim_loss_weight: 0.2
