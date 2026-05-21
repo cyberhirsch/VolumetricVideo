@@ -14,7 +14,16 @@
 /docs/papers/
 
 # --- Personal / private drafts (keep local only) ------------------
+# Emails, letters, and anything tagged private/personal/draft stay
+# off the repo regardless of where they live.
 /docs/email_to_lukas_and_sebastian.md
+*email*
+*letter*
+*private*
+*personal*
+*.draft.md
+*-draft.md
+*.private.*
 
 # --- Datasets, checkpoints, rendered results ----------------------
 /data/
