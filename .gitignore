@@ -24,6 +24,10 @@
 *.draft.md
 *-draft.md
 *.private.*
+/docs/chiemgau-stiftung-antrag.md
+/docs/forschungsvorhaben.md
+/docs/concept-paper.md
+
 
 # --- Datasets, checkpoints, rendered results ----------------------
 /data/

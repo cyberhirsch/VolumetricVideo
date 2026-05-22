@@ -9,13 +9,22 @@
     body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
            background: #111; color: #eee; }
     header { padding: 8px 14px; background: #1a1a1a; border-bottom: 1px solid #2a2a2a;
-             display: flex; gap: 16px; align-items: center; font-size: 13px; }
+             display: flex; gap: 14px; align-items: center; font-size: 13px;
+             flex-wrap: wrap; }
     header label { display: flex; align-items: center; gap: 6px; }
-    header input[type=range] { width: 220px; }
+    header input[type=number], header input[type=text], header select {
+             background: #222; color: #eee; border: 1px solid #333;
+             border-radius: 3px; padding: 2px 4px; }
     #status { margin-left: auto; opacity: 0.7; font-variant-numeric: tabular-nums; }
-    #wrap { display: flex; justify-content: center; padding: 16px; }
+    #wrap { display: flex; justify-content: center; padding: 16px 16px 8px; }
+    #timebar { display: flex; align-items: center; gap: 12px; padding: 8px 18px 14px;
+               background: #111; }
+    #timebar input[type=range] { flex: 1; }
+    #timebar #fval { font-variant-numeric: tabular-nums; opacity: 0.8;
+               min-width: 8em; text-align: right; }
     #view { display: block; background: #000; border-radius: 6px;
-            cursor: grab; touch-action: none; image-rendering: auto; }
+            cursor: grab; touch-action: none; image-rendering: auto;
+            max-width: 100%; height: auto; }
     #view:active { cursor: grabbing; }
     .help { padding: 6px 14px; font-size: 11px; opacity: 0.5; }
     code { background: #222; padding: 1px 5px; border-radius: 3px; font-size: 11px; }
@@ -24,22 +33,39 @@
 <body>
   <header>
     <strong>TGH Live</strong>
-    <label>server <input id="url" type="text" value="ws://localhost:8765" size="22" /></label>
-    <label>time <input id="t" type="range" min="0" max="1" step="0.0033" value="0.5" />
-           <span id="tval" style="display:inline-block;width:3em">0.50</span></label>
+    <label>server <input id="url" type="text" value="ws://localhost:8765" size="20" /></label>
+    <label>model <select id="ckpt"><option value="">—</option></select></label>
+    <label>frames <input id="frames" type="number" min="1" max="100000" value="1200" style="width:5em" /></label>
+    <label>fps <input id="fps" type="number" min="1" max="240" value="30" style="width:3.5em" /></label>
     <label>quality <select id="quality">
       <option value="640x480">640x480</option>
-      <option value="800x600" selected>800x600</option>
+      <option value="800x600">800x600</option>
       <option value="1024x768">1024x768</option>
-      <option value="1280x720">1280x720</option>
+      <option value="1280x720" selected>1280x720</option>
+      <option value="1920x1080">1920x1080</option>
     </select></label>
-    <button id="play">▶ play time</button>
+    <label>view <select id="mode">
+      <option value="rgb" selected>RGB</option>
+      <option value="flow">Motion flow</option>
+      <option value="blend">Motion + scene</option>
+    </select></label>
+    <span id="legend" style="display:none; align-items:center; gap:6px">
+      <canvas id="wheel" width="34" height="34" title="motion colour key"></canvas>
+      <span style="opacity:0.55">colour = direction · brightness = speed</span>
+    </span>
     <button id="reset">⟳ reset view</button>
     <span id="status">disconnected</span>
   </header>
-  <div id="wrap"><canvas id="view" width="800" height="600"></canvas></div>
+  <div id="wrap"><canvas id="view" width="1280" height="720"></canvas></div>
+  <div id="timebar">
+    <button id="play">▶ play</button>
+    <input id="frame" type="range" min="0" max="1199" step="1" value="0" />
+    <span id="fval">0000 / 1200</span>
+  </div>
   <div class="help">
-    Drag to orbit · scroll to zoom · shift+drag to pan · time slider scrubs frames ·
+    Drag to orbit · scroll to zoom · shift+drag to pan · frame slider scrubs ·
+    <code>play</code> runs the sequence at its real fps · <code>model</code> loads
+    a checkpoint · <code>view</code> switches colour / motion field ·
     requires <code>python tgh_serve.py</code> running on the same machine.
   </div>
 
@@ -65,9 +91,14 @@ const state = {
 const canvas = document.getElementById('view');
 const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
-const tSlider = document.getElementById('t');
-const tVal = document.getElementById('tval');
+const frameSlider = document.getElementById('frame');
+const fval = document.getElementById('fval');
+const ckptSel = document.getElementById('ckpt');
+const framesInput = document.getElementById('frames');
+const fpsInput = document.getElementById('fps');
 const quality = document.getElementById('quality');
+const modeEl = document.getElementById('mode');
+const legendEl = document.getElementById('legend');
 const playBtn = document.getElementById('play');
 const urlEl = document.getElementById('url');
 
@@ -75,9 +106,13 @@ let ws = null;
 let pending = false;     // true while waiting for a frame from the server
 let needSend = false;    // true if state changed while pending
 let lastSendT = 0;
-let frames = 0;
+let frames = 0;          // rendered-frame counter (drives the fps readout)
 let lastFpsT = performance.now();
 let playing = false;
+let totalFrames = 1200;  // sequence length, set by the server's info message
+let seqFps = 30;         // sequence playback fps
+let playClock = 0;       // fractional frame position during playback
+let lastTick = 0;        // timestamp of the previous animation tick
 
 // Resolution dropdown
 function applyQuality() {
@@ -86,6 +121,49 @@ function applyQuality() {
   request();
 }
 quality.addEventListener('change', applyQuality);
+
+// View mode (rgb / flow / blend) — re-render and toggle the colour key
+function applyMode() {
+  legendEl.style.display = (modeEl.value === 'rgb') ? 'none' : 'flex';
+  request();
+}
+modeEl.addEventListener('change', applyMode);
+
+// Draw the motion colour key: hue = flow direction, white center = slow.
+// Schematic version of the server's Middlebury wheel (close enough as a key).
+(function drawWheel() {
+  const wc = document.getElementById('wheel');
+  const wctx = wc.getContext('2d');
+  const W = wc.width, H = wc.height, cx = W/2, cy = H/2, R = W/2 - 1;
+  const img = wctx.createImageData(W, H);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const dx = x - cx, dy = y - cy;
+      const r = Math.sqrt(dx*dx + dy*dy);
+      const i = (y*W + x) * 4;
+      if (r > R) { img.data[i+3] = 0; continue; }
+      const hue = (Math.atan2(-dy, -dx) / (2*Math.PI)) + 0.5;  // [0,1]
+      const [cr, cg, cb] = hsvToRgb(hue, Math.min(r/R, 1), 1);
+      img.data[i] = cr; img.data[i+1] = cg; img.data[i+2] = cb; img.data[i+3] = 255;
+    }
+  }
+  wctx.putImageData(img, 0, 0);
+})();
+
+function hsvToRgb(h, s, v) {
+  const i = Math.floor(h*6), f = h*6 - i;
+  const p = v*(1-s), q = v*(1-f*s), t = v*(1-(1-f)*s);
+  let r, g, b;
+  switch (i % 6) {
+    case 0: r=v; g=t; b=p; break;
+    case 1: r=q; g=v; b=p; break;
+    case 2: r=p; g=v; b=t; break;
+    case 3: r=p; g=q; b=v; break;
+    case 4: r=t; g=p; b=v; break;
+    default: r=v; g=p; b=q;
+  }
+  return [r*255|0, g*255|0, b*255|0];
+}
 
 // Mouse / touch input
 let dragging = false, panning = false, lastX = 0, lastY = 0;
@@ -116,27 +194,42 @@ canvas.addEventListener('wheel', e => {
   request();
 }, {passive: false});
 
-// Time slider
-tSlider.addEventListener('input', () => {
-  tVal.textContent = parseFloat(tSlider.value).toFixed(2);
+// Frame slider + realtime playback
+function updateFrameLabel() {
+  const f = parseInt(frameSlider.value) || 0;
+  fval.textContent = String(f).padStart(4, '0') + ' / ' + totalFrames;
+}
+frameSlider.addEventListener('input', () => {
+  playClock = parseInt(frameSlider.value) || 0;
+  updateFrameLabel();
   request();
 });
 playBtn.addEventListener('click', () => {
   playing = !playing;
-  playBtn.textContent = playing ? '⏸ pause' : '▶ play time';
+  playBtn.textContent = playing ? '⏸ pause' : '▶ play';
+  if (playing) { playClock = parseInt(frameSlider.value) || 0; lastTick = 0; }
 });
 document.getElementById('reset').addEventListener('click', () => {
   state.target = [0.5, -1.0, 4.5];
   state.yaw = 0; state.pitch = 0; state.dist = 5.0; state.fovDeg = 75;
   request();
 });
-function tickTime() {
-  if (playing) {
-    let v = parseFloat(tSlider.value) + 0.0033;  // ~10s sequence at 30fps -> 1/300 per frame
-    if (v >= 1) v = 0;
-    tSlider.value = v;
-    tVal.textContent = v.toFixed(2);
-    request();
+// Realtime playback: advance frames by wall-clock time at the sequence fps.
+// If rendering can't keep up, frames are skipped so playback stays realtime.
+function tickTime(now) {
+  if (playing && totalFrames > 1) {
+    if (!lastTick) lastTick = now;
+    playClock += ((now - lastTick) / 1000) * seqFps;
+    lastTick = now;
+    playClock %= totalFrames;
+    const f = Math.floor(playClock);
+    if (f !== (parseInt(frameSlider.value) || 0)) {
+      frameSlider.value = f;
+      updateFrameLabel();
+      request();
+    }
+  } else {
+    lastTick = 0;
   }
   requestAnimationFrame(tickTime);
 }
@@ -181,7 +274,8 @@ function getPose() {
   const W = canvas.width, H = canvas.height;
   const f = (H / 2) / Math.tan((state.fovDeg * Math.PI / 180) / 2);
   const K = [[f, 0, W/2], [0, f, H/2], [0, 0, 1]];
-  return {K, R, T, H, W, t: parseFloat(tSlider.value), n: 0.5, f: 200.0};
+  const t = (parseInt(frameSlider.value) || 0) / Math.max(1, totalFrames - 1);
+  return {K, R, T, H, W, t, n: 0.5, f: 200.0, mode: modeEl.value};
 }
 
 //
@@ -199,7 +293,11 @@ function connect() {
   ws.onmessage = ev => {
     const latency = performance.now() - lastSendT;
     if (typeof ev.data === 'string') {
-      try { const m = JSON.parse(ev.data); if (m.error) statusEl.textContent = 'render error: ' + m.error; } catch {}
+      try {
+        const m = JSON.parse(ev.data);
+        if (m.type === 'info') { applyInfo(m); return; }
+        if (m.error) statusEl.textContent = 'render error: ' + m.error;
+      } catch {}
       pending = false; if (needSend) { needSend = false; request(); }
       return;
     }
@@ -223,6 +321,57 @@ function connect() {
   };
 }
 urlEl.addEventListener('change', connect);
+
+//
+// === Model loading + sequence metadata ===
+//
+function send(obj) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+}
+
+// Apply a server { type:"info" } message: checkpoint list, sequence length, fps.
+function applyInfo(m) {
+  if (m.frames) totalFrames = m.frames;
+  if (m.fps) seqFps = m.fps;
+  frameSlider.max = Math.max(0, totalFrames - 1);
+  framesInput.value = totalFrames;
+  fpsInput.value = seqFps;
+  if (Array.isArray(m.checkpoints)) {
+    ckptSel.innerHTML = '';
+    m.checkpoints.forEach(c => {
+      const o = document.createElement('option');
+      o.value = c; o.textContent = c;
+      if (c === m.ckpt) o.selected = true;
+      ckptSel.appendChild(o);
+    });
+  }
+  if ((parseInt(frameSlider.value) || 0) > totalFrames - 1) frameSlider.value = 0;
+  playClock = parseInt(frameSlider.value) || 0;
+  updateFrameLabel();
+  const g = (m.gaussians || 0).toLocaleString();
+  statusEl.textContent = 'loaded ' + (m.ckpt || '?') + ' · ' + g + ' splats';
+  request();
+}
+
+// Selecting a model tells the server to load that checkpoint.
+ckptSel.addEventListener('change', () => {
+  if (!ckptSel.value) return;
+  statusEl.textContent = 'loading ' + ckptSel.value + ' …';
+  playing = false; playBtn.textContent = '▶ play';
+  send({cmd: 'load', ckpt: ckptSel.value});
+});
+// Manual sequence-length override (server uses it for the time mapping).
+framesInput.addEventListener('change', () => {
+  const n = Math.max(1, parseInt(framesInput.value) || 1);
+  totalFrames = n;
+  frameSlider.max = Math.max(0, n - 1);
+  updateFrameLabel();
+  send({cmd: 'set_frames', frames: n});
+});
+// Playback fps is a pure viewer-side concern.
+fpsInput.addEventListener('change', () => {
+  seqFps = Math.max(1, parseInt(fpsInput.value) || 30);
+});
 
 function request() {
   if (!ws || ws.readyState !== 1) return;

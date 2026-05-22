@@ -5,25 +5,38 @@ Loads the trained GaussianTHSampler checkpoint and serves rendered frames
 over WebSocket to a browser client (see tgh_viewer.html).
 
 Protocol:
-  Client -> Server (JSON):  { K, R, T, H, W, t }
+  Client -> Server (JSON):  { K, R, T, H, W, t, mode }
     K: 3x3 intrinsics (list of lists)
     R: 3x3 world-to-camera rotation (list of lists)
     T: 3x1 world-to-camera translation (list of lists)
     H, W: image height/width
     t: normalized time in [0, 1]
+    mode: "rgb" (default) | "flow" | "blend"
+      rgb   - the ordinary rendered colour image
+      flow  - per-Gaussian motion visualised with the Middlebury colour wheel
+      blend - the colour-coded motion glow over a dimmed greyscale scene
 
-  Server -> Client (binary):  JPEG bytes of the rendered RGB frame.
+  Client -> Server (JSON):  { cmd: "load"|"set_frames"|"info", ... }
+    load        { cmd:"load", ckpt:"<dir>/<file>.pt", frames?:int }
+    set_frames  { cmd:"set_frames", frames:int }
+    info        { cmd:"info" }   -> request the info message below
+
+  Server -> Client (binary):  JPEG bytes of a rendered frame.
+  Server -> Client (JSON):    { type:"info", checkpoints, ckpt, frames, fps,
+                                gaussians }  - sent on connect and after load.
 
 Run as:
   bash serve.sh
 or directly:
-  python tgh_serve.py [--port 8765] [--ckpt /path/to/latest.pt]
+  python tgh_serve.py [--port 8765] [--ckpt <dir>/latest.pt] [--frames N]
 """
 
 import os
 import sys
 import io
 import json
+import math
+import glob
 import argparse
 import asyncio
 import time
@@ -38,10 +51,10 @@ sys.argv = [
     "tgh_serve.py",
     "-t", "test",
     "-c", "configs/exps/gaussianth/gaussianth_flame_salmon.yaml",
-    # full 300-frame timeline accessible at eval-time
-    "val_dataloader_cfg.dataset_cfg.frame_sample=[0,300,1]",
+    # full 1200-frame timeline accessible at eval-time
+    "val_dataloader_cfg.dataset_cfg.frame_sample=[0,1200,1]",
     "val_dataloader_cfg.dataset_cfg.ratio=0.5",
-    "dataloader_cfg.dataset_cfg.frame_sample=[0,300,1]",
+    "dataloader_cfg.dataset_cfg.frame_sample=[0,1200,1]",
     "dataloader_cfg.dataset_cfg.ratio=0.5",
     "val_dataloader_cfg.dataset_cfg.dataloading_workers=4",
     "dataloader_cfg.dataset_cfg.dataloading_workers=4",
@@ -58,28 +71,74 @@ from easyvolcap.utils.import_utils import discover_modules
 discover_modules()  # populate the registries by importing every submodule
 from easyvolcap.utils.base_utils import dotdict
 from easyvolcap.utils.console_utils import log
+from easyvolcap.utils.data_utils import to_x
+from easyvolcap.utils.gaussian_utils import render_diff_gauss, prepare_gaussian_camera
 
 
-def build_model_with_checkpoint(ckpt_path: str):
-    """Construct the VolumetricVideoModel and load weights.
+# --------------------------------------------------------------- server state
+CKPT_ROOT = os.path.expanduser("~/lvv-data/trained_model")
 
-    We deliberately skip the dataloader/runner construction: a render server
-    does not need a val_dataloader (which would otherwise spend 5+ minutes
-    decoding the entire 300-frame training set into memory).
+# Mutable globals shared with the websocket handlers.
+MODEL = None
+STATE = dotdict(ckpt=None, frames=1200, fps=30, gaussians=0)
+
+
+def list_checkpoints():
+    """Every '<dir>/<file>.pt' under CKPT_ROOT, latest.pt first per directory."""
+    rels = []
+    for pt in glob.glob(os.path.join(CKPT_ROOT, "*", "*.pt")):
+        rels.append(os.path.relpath(pt, CKPT_ROOT).replace(os.sep, "/"))
+    rels.sort(key=lambda p: (os.path.dirname(p), not p.endswith("latest.pt"), p))
+    return rels
+
+
+def guess_frames(rel: str) -> int:
+    """Best-effort sequence length from a checkpoint name (overridable)."""
+    return 1200 if "1200" in rel.lower() else 300
+
+
+def build_model():
+    """Construct the VolumetricVideoModel (no dataloader / runner).
+
+    A render server does not need a val_dataloader, which would otherwise
+    spend 5+ minutes decoding the whole training set into memory.
     """
-    model = MODELS.build(cfg.model_cfg).cuda()
+    return MODELS.build(cfg.model_cfg).cuda()
 
-    log(f"loading checkpoint: {ckpt_path}")
-    ckpt = torch.load(ckpt_path, map_location="cuda", weights_only=False)
+
+def load_checkpoint(name: str, frames: int = None):
+    """Load a checkpoint into the global MODEL and update STATE.
+
+    `name` is an absolute path or a '<dir>/<file>.pt' path relative to
+    CKPT_ROOT. `frames` overrides the auto-guessed sequence length.
+    """
+    path = name if os.path.isabs(name) else os.path.join(CKPT_ROOT, name)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"checkpoint not found: {path}")
+    rel = os.path.relpath(path, CKPT_ROOT).replace(os.sep, "/")
+
+    log(f"loading checkpoint: {path}")
+    ckpt = torch.load(path, map_location="cuda", weights_only=False)
     state = ckpt.get("network", ckpt.get("model", ckpt))
-    res = model.load_state_dict(state, strict=False, assign=True)
+    res = MODEL.load_state_dict(state, strict=False, assign=True)
     if res.missing_keys:
         log(f"missing keys ({len(res.missing_keys)}): {res.missing_keys[:5]} ...")
     if res.unexpected_keys:
         log(f"unexpected keys ({len(res.unexpected_keys)}): {res.unexpected_keys[:5]} ...")
+    MODEL.eval()
 
-    model.eval()
-    return model
+    # The hierarchy caches a segment index built against the PREVIOUS Gaussian
+    # set; drop it so active_indices() rebuilds against the freshly loaded
+    # buffers (otherwise a reload renders the wrong active subset).
+    h = MODEL.sampler.hierarchy
+    h._segment_index = None
+    h._global_indices = None
+
+    STATE.ckpt = rel
+    STATE.frames = int(frames) if frames else guess_frames(rel)
+    STATE.gaussians = len(MODEL.sampler.gaussians)
+    log(f"loaded {rel}: {STATE.gaussians} Gaussians, "
+        f"frames={STATE.frames}, fps={STATE.fps}")
 
 
 def build_render_batch(req: dict) -> dotdict:
@@ -92,9 +151,9 @@ def build_render_batch(req: dict) -> dotdict:
         T = T[:, None]
 
     t_norm = float(req["t"])
-    # Map normalized t to a frame index in [0, 299]; sample_index_time will
-    # then recompute t internally during eval mode.
-    n_train_frames = 300
+    # Map normalized t to a frame index; sample_index_time will then recompute
+    # t internally during eval mode.
+    n_train_frames = STATE.frames
     latent_index = int(round(t_norm * (n_train_frames - 1)))
     latent_index = max(0, min(n_train_frames - 1, latent_index))
 
@@ -131,35 +190,175 @@ def build_render_batch(req: dict) -> dotdict:
     return batch
 
 
-def render_to_jpeg(model, batch, quality: int = 80) -> bytes:
-    with torch.inference_mode():
-        # VolumetricVideoModel.render_rays does `del batch.output` after copying
-        # the reference into `output`, so we must read rgb_map from the return
-        # value, not from batch.
-        output = model(batch)
-    rgb = output.rgb_map  # (B, H*W, 3)
+# --------------------------------------------------------------- motion colours
+_COLOR_WHEEL = None
+
+
+def _color_wheel() -> torch.Tensor:
+    """The standard Middlebury optical-flow colour wheel as a (55, 3) CUDA tensor.
+
+    Hue encodes flow direction; the magnitude-blend toward white is applied
+    later in `flow_uv_to_rgb`.
+    """
+    global _COLOR_WHEEL
+    if _COLOR_WHEEL is not None:
+        return _COLOR_WHEEL
+    RY, YG, GC, CB, BM, MR = 15, 6, 4, 11, 13, 6
+    ncols = RY + YG + GC + CB + BM + MR
+    w = np.zeros((ncols, 3), dtype=np.float32)
+    c = 0
+    w[c:c+RY, 0] = 1.0;                    w[c:c+RY, 1] = np.arange(RY) / RY;  c += RY
+    w[c:c+YG, 0] = 1.0 - np.arange(YG)/YG; w[c:c+YG, 1] = 1.0;                 c += YG
+    w[c:c+GC, 1] = 1.0;                    w[c:c+GC, 2] = np.arange(GC) / GC;  c += GC
+    w[c:c+CB, 1] = 1.0 - np.arange(CB)/CB; w[c:c+CB, 2] = 1.0;                 c += CB
+    w[c:c+BM, 2] = 1.0;                    w[c:c+BM, 0] = np.arange(BM) / BM;  c += BM
+    w[c:c+MR, 2] = 1.0 - np.arange(MR)/MR; w[c:c+MR, 0] = 1.0
+    _COLOR_WHEEL = torch.from_numpy(w).cuda()
+    return _COLOR_WHEEL
+
+
+def flow_uv_to_rgb(fx: torch.Tensor, fy: torch.Tensor,
+                   max_mag: torch.Tensor, on_white: bool = True) -> torch.Tensor:
+    """Map per-Gaussian 2D screen flow (fx, fy) to RGB via the colour wheel.
+
+    on_white=True  -> Middlebury look: zero flow is white, fast flow saturated.
+    on_white=False -> glow look: zero flow is black (for additive blending).
+    """
+    wheel = _color_wheel()
+    ncols = wheel.shape[0]
+    mag = torch.sqrt(fx * fx + fy * fy)
+    ang = torch.atan2(-fy, -fx) / math.pi                       # [-1, 1]
+    fk = (ang + 1.0) / 2.0 * (ncols - 1)                        # [0, ncols-1]
+    k0 = torch.floor(fk).long().clamp(0, ncols - 1)
+    k1 = (k0 + 1) % ncols
+    f = (fk - k0.float()).unsqueeze(1)
+    col = (1.0 - f) * wheel[k0] + f * wheel[k1]                 # (M, 3)
+    rad = (mag / max_mag).clamp(0.0, 1.0).unsqueeze(1)
+    if on_white:
+        col = 1.0 - rad * (1.0 - col)                          # white at rad=0
+    else:
+        col = rad * col                                        # black at rad=0
+    return col.clamp(0.0, 1.0)
+
+
+def _project(xyz: torch.Tensor, K: torch.Tensor,
+             R: torch.Tensor, T: torch.Tensor) -> torch.Tensor:
+    """Project world-space points (M, 3) to pixel coordinates (M, 2)."""
+    cam = xyz @ R.mT + T.reshape(1, 3)                          # (M, 3)
+    z = cam[:, 2:3].clamp_min(1e-6)
+    uvw = (cam / z) @ K.mT                                      # (M, 3)
+    return uvw[:, :2]
+
+
+def render_rgb_array(model, batch) -> torch.Tensor:
+    """Ordinary colour render -> (H, W, 3) float tensor in [0, 1]."""
+    output = model(batch)
+    rgb = output.rgb_map                                       # (B, H*W, 3)
     H, W = int(batch.meta.H[0].item()), int(batch.meta.W[0].item())
-    img = rgb[0].reshape(H, W, 3).clamp(0, 1).cpu().numpy()
-    img = (img * 255).astype(np.uint8)
+    return rgb[0].reshape(H, W, 3).clamp(0, 1)
+
+
+def render_flow_array(model, batch, on_white: bool = True) -> torch.Tensor:
+    """Render the per-Gaussian motion field -> (H, W, 3) float tensor in [0, 1].
+
+    Each 4D Gaussian carries an implicit linear velocity v = Sigma_xt / Sigma_tt
+    (the space-time cross-covariance). We advance every active Gaussian by one
+    inter-frame interval, measure its on-screen displacement, colour-code that
+    2D flow with the Middlebury wheel, and rasterise through the same splatter.
+    """
+    sampler = model.sampler
+    g = sampler.gaussians
+    t = float(batch.t.reshape(-1)[0].item())
+
+    # Eq. 7: indices of Gaussians active at this timestamp (active-subset path)
+    idx = sampler.hierarchy.active_indices(t)
+
+    # Sec. 3.2.1: condition only the active 4D Gaussians into 3D at time t
+    xyz3, cov6, occ1 = g.get_conditional_3d(t, idx)
+
+    # implicit per-Gaussian velocity v = Sigma_xt / Sigma_tt (active subset)
+    cov4 = g.get_cov4(idx)                                     # (M, 4, 4)
+    vel = (cov4[:, :3, 3:4] / cov4[:, 3:4, 3:4].clamp_min(1e-12))[..., 0]  # (M, 3)
+
+    # screen-space flow over one inter-frame step
+    K, R, T = batch.K[0], batch.R[0], batch.T[0]
+    dt = 1.0 / max(1, STATE.frames - 1)
+    flow = _project(xyz3 + vel * dt, K, R, T) - _project(xyz3, K, R, T)  # (M, 2)
+    mag = flow.norm(dim=1)
+    max_mag = (torch.quantile(mag, 0.95).clamp_min(1.0)
+               if mag.numel() else torch.ones((), device=xyz3.device))
+    color = flow_uv_to_rgb(flow[:, 0], flow[:, 1], max_mag, on_white=on_white)
+
+    camera = to_x(prepare_gaussian_camera(batch), torch.float)
+    rgb, acc, _, _ = render_diff_gauss(xyz3, color, cov6, occ1, camera)
+    img = rgb[0]                                               # (H, W, 3)
+    if on_white:
+        img = img + (1.0 - acc[0])                             # white background
+    return img.clamp(0, 1)
+
+
+def render_to_jpeg(model, batch, mode: str = "rgb", quality: int = 80) -> bytes:
+    # VolumetricVideoModel.render_rays does `del batch.output` after copying the
+    # reference into `output`, so colour data is read from the return value.
+    with torch.inference_mode():
+        if mode == "flow":
+            img = render_flow_array(model, batch, on_white=True)
+        elif mode == "blend":
+            scene = render_rgb_array(model, batch)
+            grey = scene.mean(dim=-1, keepdim=True).expand_as(scene) * 0.55
+            glow = render_flow_array(model, batch, on_white=False)
+            img = (grey + glow).clamp(0, 1)
+        else:
+            img = render_rgb_array(model, batch)
+    img = (img.cpu().numpy() * 255).astype(np.uint8)
     buf = io.BytesIO()
     Image.fromarray(img).save(buf, format="JPEG", quality=quality)
     return buf.getvalue()
 
 
-# Globals so the websocket handler can reach the loaded model
-MODEL = None
+async def send_info(websocket):
+    """Push the current model + checkpoint list to a client (text frame)."""
+    await websocket.send(json.dumps({
+        "type": "info",
+        "checkpoints": list_checkpoints(),
+        "ckpt": STATE.ckpt,
+        "frames": STATE.frames,
+        "fps": STATE.fps,
+        "gaussians": STATE.gaussians,
+    }))
+
+
+async def handle_command(websocket, req: dict):
+    """Handle a non-render control message ({'cmd': ...})."""
+    cmd = req.get("cmd")
+    if cmd in ("info", "list", "hello"):
+        await send_info(websocket)
+    elif cmd == "load":
+        log(f"client requested checkpoint: {req.get('ckpt')}")
+        load_checkpoint(req["ckpt"], req.get("frames"))
+        await send_info(websocket)
+    elif cmd == "set_frames":
+        STATE.frames = max(1, int(req.get("frames", STATE.frames)))
+        await send_info(websocket)
+    else:
+        await websocket.send(json.dumps({"error": f"unknown command: {cmd}"}))
 
 
 async def handle_client(websocket):
     log(f"client connected: {websocket.remote_address}")
+    await send_info(websocket)
     rendered = 0
     t0 = time.perf_counter()
     try:
         async for message in websocket:
             try:
                 req = json.loads(message)
+                if isinstance(req, dict) and "cmd" in req:
+                    await handle_command(websocket, req)
+                    continue
                 batch = build_render_batch(req)
-                jpeg = render_to_jpeg(MODEL, batch)
+                mode = str(req.get("mode", "rgb"))
+                jpeg = render_to_jpeg(MODEL, batch, mode)
                 await websocket.send(jpeg)
                 rendered += 1
                 if time.perf_counter() - t0 > 5:
@@ -170,7 +369,7 @@ async def handle_client(websocket):
             except Exception as e:
                 import traceback
                 traceback.print_exc()
-                await websocket.send(json.dumps({"error": str(e)}).encode())
+                await websocket.send(json.dumps({"error": str(e)}))
     finally:
         log(f"client disconnected: {websocket.remote_address}")
 
@@ -180,13 +379,19 @@ async def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8765)
-    ap.add_argument("--ckpt", default=os.path.expanduser(
-        "~/lvv-data/trained_model/gaussianth_flame_salmon/latest.pt"))
+    ap.add_argument("--ckpt",
+                    default="gaussianth_flame_salmon_1200/2026-05-21_0141_1200f_latest.pt",
+                    help="initial checkpoint (abs path or relative to CKPT_ROOT)")
+    ap.add_argument("--frames", type=int, default=0,
+                    help="initial sequence length (0 = auto-guess from name)")
+    ap.add_argument("--fps", type=int, default=30,
+                    help="sequence playback fps reported to the viewer")
     # ignore unknown args (those were consumed by EasyVolcap's argparse)
     args, _ = ap.parse_known_args()
 
-    MODEL = build_model_with_checkpoint(args.ckpt)
-    log(f"model loaded, sampler has {len(MODEL.sampler.gaussians)} 4D Gaussians")
+    STATE.fps = args.fps
+    MODEL = build_model()
+    load_checkpoint(args.ckpt, args.frames or None)
     log(f"starting WebSocket server on ws://0.0.0.0:{args.port}")
 
     async with websockets.serve(handle_client, "0.0.0.0", args.port,

@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # Long run on Neural3DV flame_salmon (the paper's canonical Table 1 benchmark).
-# 3000 iters, paper-default adaptive control, 1200 frames at ratio 0.5.
+# 3000 iters, paper-default adaptive control, 300 frames at ratio 0.5.
 #
-# This is the largest training run of the reproduction so far. The TGH's
-# per-iter cost is governed by the active segment subset (constant in video
-# length), so even 1200 frames stays affordable per iteration. Densification
-# runs from iter 500 to 2500 every 100 iters (= 20 events).
+# The TGH per-iter cost is governed by the active segment subset, so this run
+# is a practical smoke/benchmark for the active-row conditioning speedup.
 set -o pipefail
 
 ENV="$HOME/miniconda3/envs/lvv"

@@ -118,6 +118,9 @@ bash serve.sh                          # start the render server
 ```
 
 Viewer controls: drag to orbit, scroll to zoom, time slider scrubs frames.
+The `view` selector switches between the colour image and a motion-field
+visualisation — each 4D Gaussian's implicit velocity (`Σ_xt / Σ_tt`)
+colour-coded with the Middlebury optical-flow wheel.
 See [`docs/vr-viewing-options.md`](docs/vr-viewing-options.md) for the VR /
 WebXR roadmap.
 
