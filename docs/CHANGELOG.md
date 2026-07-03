@@ -30,6 +30,10 @@ prototype. Dates use local project time.
 - Densification statistics continue to scatter gradients back to global
   Gaussian rows through `gs_idx`, preserving the global optimizer state.
 - `run_th_flame_salmon.sh` was normalized to LF line endings for WSL execution.
+- Fixed the live viewer backend time mapping so a loaded checkpoint's sequence
+  length updates `STATE.frames`, EasyVolcap's train/val `frame_sample`, and the
+  sampler's own `frame_sample` together. This prevents a 300-frame checkpoint
+  from being rendered through a stale 1200-frame timeline.
 
 ### Benchmark Notes
 

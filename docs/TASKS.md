@@ -50,6 +50,11 @@ Video / TGH prototype.
 
 ## Done
 
+- [x] Fix live viewer/backend time mapping for loaded checkpoints.
+  - `tgh_serve.py` now applies the selected frame count to `STATE.frames`,
+    EasyVolcap train/val `frame_sample`, and `MODEL.sampler.frame_sample`.
+  - Sanity check: frame 150 on the 300-frame active-subset checkpoint maps to
+    sampler time `t=0.501672` and sampler index `150`.
 - [x] Finish the fresh 50k active-subset benchmark.
   - Experiment: `gaussianth_flame_salmon_active_subset_50k`.
   - Exit code: 0.

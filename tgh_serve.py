@@ -47,6 +47,7 @@ from pathlib import Path
 _EVC_DIR = "/mnt/g/3D Generation/Long Volumetric Video/EasyVolcap"
 os.chdir(_EVC_DIR)
 
+_CLI_ARGV = sys.argv[1:]
 sys.argv = [
     "tgh_serve.py",
     "-t", "test",
@@ -106,6 +107,24 @@ def build_model():
     return MODELS.build(cfg.model_cfg).cuda()
 
 
+def set_sequence_frames(frames: int):
+    """Apply the playback/training sequence length to every time-mapping path."""
+    frames = max(1, int(frames))
+    frame_sample = [0, frames, 1]
+
+    STATE.frames = frames
+    cfg.val_dataloader_cfg.dataset_cfg.frame_sample = frame_sample.copy()
+    cfg.dataloader_cfg.dataset_cfg.frame_sample = frame_sample.copy()
+
+    if MODEL is not None and hasattr(MODEL, "sampler"):
+        sampler = MODEL.sampler
+        sampler.frame_sample = frame_sample.copy()
+        if hasattr(sampler, "n_frames"):
+            sampler.n_frames = frames
+
+    log(f"sequence frames set to {frames}, frame_sample={frame_sample}")
+
+
 def load_checkpoint(name: str, frames: int = None):
     """Load a checkpoint into the global MODEL and update STATE.
 
@@ -135,7 +154,7 @@ def load_checkpoint(name: str, frames: int = None):
     h._global_indices = None
 
     STATE.ckpt = rel
-    STATE.frames = int(frames) if frames else guess_frames(rel)
+    set_sequence_frames(int(frames) if frames else guess_frames(rel))
     STATE.gaussians = len(MODEL.sampler.gaussians)
     log(f"loaded {rel}: {STATE.gaussians} Gaussians, "
         f"frames={STATE.frames}, fps={STATE.fps}")
@@ -338,7 +357,7 @@ async def handle_command(websocket, req: dict):
         load_checkpoint(req["ckpt"], req.get("frames"))
         await send_info(websocket)
     elif cmd == "set_frames":
-        STATE.frames = max(1, int(req.get("frames", STATE.frames)))
+        set_sequence_frames(req.get("frames", STATE.frames))
         await send_info(websocket)
     else:
         await websocket.send(json.dumps({"error": f"unknown command: {cmd}"}))
@@ -386,8 +405,8 @@ async def main():
                     help="initial sequence length (0 = auto-guess from name)")
     ap.add_argument("--fps", type=int, default=30,
                     help="sequence playback fps reported to the viewer")
-    # ignore unknown args (those were consumed by EasyVolcap's argparse)
-    args, _ = ap.parse_known_args()
+    # Parse the real command line saved before EasyVolcap argv injection.
+    args, _ = ap.parse_known_args(_CLI_ARGV)
 
     STATE.fps = args.fps
     MODEL = build_model()
