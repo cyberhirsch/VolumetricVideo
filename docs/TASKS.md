@@ -50,6 +50,13 @@ Video / TGH prototype.
 
 ## Done
 
+- [x] Harden `tgh_serve.py` after code review.
+  - Bind `127.0.0.1` by default (`--host` to override); reject `load` paths
+    that escape `CKPT_ROOT` (torch.load unpickles, so client paths are unsafe).
+  - Run checkpoint loads/renders in worker threads behind a GPU lock so
+    keepalive pings keep flowing during long loads.
+  - Fail `load` when model keys are left unfilled; parse `<N>f` from names in
+    `guess_frames`; subsample the flow quantile above the torch.quantile limit.
 - [x] Fix live viewer/backend time mapping for loaded checkpoints.
   - `tgh_serve.py` now applies the selected frame count to `STATE.frames`,
     EasyVolcap train/val `frame_sample`, and `MODEL.sampler.frame_sample`.

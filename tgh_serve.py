@@ -28,10 +28,12 @@ Protocol:
 Run as:
   bash serve.sh
 or directly:
-  python tgh_serve.py [--port 8765] [--ckpt <dir>/latest.pt] [--frames N]
+  python tgh_serve.py [--host 127.0.0.1] [--port 8765] [--ckpt <dir>/latest.pt]
+                      [--frames N]
 """
 
 import os
+import re
 import sys
 import io
 import json
@@ -83,6 +85,10 @@ CKPT_ROOT = os.path.expanduser("~/lvv-data/trained_model")
 MODEL = None
 STATE = dotdict(ckpt=None, frames=1200, fps=30, gaussians=0)
 
+# Serializes GPU work (checkpoint loads, renders) that runs in worker threads
+# so the event loop stays free to answer pings while the GPU is busy.
+GPU_LOCK = asyncio.Lock()
+
 
 def list_checkpoints():
     """Every '<dir>/<file>.pt' under CKPT_ROOT, latest.pt first per directory."""
@@ -94,7 +100,14 @@ def list_checkpoints():
 
 
 def guess_frames(rel: str) -> int:
-    """Best-effort sequence length from a checkpoint name (overridable)."""
+    """Best-effort sequence length from a checkpoint name (overridable).
+
+    Checkpoint files are named like '..._1200f_latest.pt'; the '<N>f' token is
+    authoritative. Fall back to the old substring heuristic for older names.
+    """
+    m = re.search(r"(\d+)f", rel.lower())
+    if m:
+        return int(m.group(1))
     return 1200 if "1200" in rel.lower() else 300
 
 
@@ -113,8 +126,10 @@ def set_sequence_frames(frames: int):
     frame_sample = [0, frames, 1]
 
     STATE.frames = frames
+    # sample_index_time reads the val dataset frame_sample and the sampler's
+    # own frame_sample at eval time; the train dataloader is never consulted
+    # by the render server.
     cfg.val_dataloader_cfg.dataset_cfg.frame_sample = frame_sample.copy()
-    cfg.dataloader_cfg.dataset_cfg.frame_sample = frame_sample.copy()
 
     if MODEL is not None and hasattr(MODEL, "sampler"):
         sampler = MODEL.sampler
@@ -125,25 +140,48 @@ def set_sequence_frames(frames: int):
     log(f"sequence frames set to {frames}, frame_sample={frame_sample}")
 
 
-def load_checkpoint(name: str, frames: int = None):
+def resolve_checkpoint_path(name: str) -> str:
+    """Resolve a client-supplied checkpoint name to a real file under CKPT_ROOT.
+
+    torch.load unpickles (weights_only=False), so a client must never be able
+    to point the server at an arbitrary file: reject absolute paths and any
+    relative path that escapes CKPT_ROOT via '..' or symlinks.
+    """
+    root = os.path.realpath(CKPT_ROOT)
+    path = os.path.realpath(os.path.join(root, name))
+    if os.path.commonpath([path, root]) != root:
+        raise ValueError(f"checkpoint path escapes checkpoint root: {name}")
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"checkpoint not found: {name}")
+    return path
+
+
+def load_checkpoint(name: str, frames: int = None, trusted: bool = False):
     """Load a checkpoint into the global MODEL and update STATE.
 
-    `name` is an absolute path or a '<dir>/<file>.pt' path relative to
-    CKPT_ROOT. `frames` overrides the auto-guessed sequence length.
+    `name` is a '<dir>/<file>.pt' path relative to CKPT_ROOT (or, for
+    trusted=True callers like the CLI, an absolute path). `frames` overrides
+    the auto-guessed sequence length.
     """
-    path = name if os.path.isabs(name) else os.path.join(CKPT_ROOT, name)
-    if not os.path.isfile(path):
-        raise FileNotFoundError(f"checkpoint not found: {path}")
+    if trusted and os.path.isabs(name):
+        path = name
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"checkpoint not found: {path}")
+    else:
+        path = resolve_checkpoint_path(name)
     rel = os.path.relpath(path, CKPT_ROOT).replace(os.sep, "/")
 
     log(f"loading checkpoint: {path}")
     ckpt = torch.load(path, map_location="cuda", weights_only=False)
     state = ckpt.get("network", ckpt.get("model", ckpt))
     res = MODEL.load_state_dict(state, strict=False, assign=True)
-    if res.missing_keys:
-        log(f"missing keys ({len(res.missing_keys)}): {res.missing_keys[:5]} ...")
     if res.unexpected_keys:
         log(f"unexpected keys ({len(res.unexpected_keys)}): {res.unexpected_keys[:5]} ...")
+    if res.missing_keys:
+        log(f"missing keys ({len(res.missing_keys)}): {res.missing_keys[:5]} ...")
+        raise RuntimeError(
+            f"checkpoint {rel} left {len(res.missing_keys)} model keys "
+            f"unfilled; refusing to serve a half-loaded model")
     MODEL.eval()
 
     # The hierarchy caches a segment index built against the PREVIOUS Gaussian
@@ -304,8 +342,14 @@ def render_flow_array(model, batch, on_white: bool = True) -> torch.Tensor:
     dt = 1.0 / max(1, STATE.frames - 1)
     flow = _project(xyz3 + vel * dt, K, R, T) - _project(xyz3, K, R, T)  # (M, 2)
     mag = flow.norm(dim=1)
-    max_mag = (torch.quantile(mag, 0.95).clamp_min(1.0)
-               if mag.numel() else torch.ones((), device=xyz3.device))
+    if mag.numel():
+        sample = mag
+        if sample.numel() > (1 << 24):  # torch.quantile input size limit
+            sel = torch.randint(0, sample.numel(), (1 << 20,), device=sample.device)
+            sample = sample[sel]
+        max_mag = torch.quantile(sample, 0.95).clamp_min(1.0)
+    else:
+        max_mag = torch.ones((), device=xyz3.device)
     color = flow_uv_to_rgb(flow[:, 0], flow[:, 1], max_mag, on_white=on_white)
 
     camera = to_x(prepare_gaussian_camera(batch), torch.float)
@@ -354,7 +398,10 @@ async def handle_command(websocket, req: dict):
         await send_info(websocket)
     elif cmd == "load":
         log(f"client requested checkpoint: {req.get('ckpt')}")
-        load_checkpoint(req["ckpt"], req.get("frames"))
+        # Run the (multi-second) load in a worker thread so the event loop
+        # keeps answering keepalive pings for other clients.
+        async with GPU_LOCK:
+            await asyncio.to_thread(load_checkpoint, req["ckpt"], req.get("frames"))
         await send_info(websocket)
     elif cmd == "set_frames":
         set_sequence_frames(req.get("frames", STATE.frames))
@@ -377,7 +424,8 @@ async def handle_client(websocket):
                     continue
                 batch = build_render_batch(req)
                 mode = str(req.get("mode", "rgb"))
-                jpeg = render_to_jpeg(MODEL, batch, mode)
+                async with GPU_LOCK:
+                    jpeg = await asyncio.to_thread(render_to_jpeg, MODEL, batch, mode)
                 await websocket.send(jpeg)
                 rendered += 1
                 if time.perf_counter() - t0 > 5:
@@ -397,6 +445,9 @@ async def main():
     global MODEL
 
     ap = argparse.ArgumentParser()
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="bind address; 0.0.0.0 exposes the server to the "
+                         "network (unsafe: 'load' unpickles checkpoints)")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--ckpt",
                     default="gaussianth_flame_salmon_1200/2026-05-21_0141_1200f_latest.pt",
@@ -410,10 +461,10 @@ async def main():
 
     STATE.fps = args.fps
     MODEL = build_model()
-    load_checkpoint(args.ckpt, args.frames or None)
-    log(f"starting WebSocket server on ws://0.0.0.0:{args.port}")
+    load_checkpoint(args.ckpt, args.frames or None, trusted=True)
+    log(f"starting WebSocket server on ws://{args.host}:{args.port}")
 
-    async with websockets.serve(handle_client, "0.0.0.0", args.port,
+    async with websockets.serve(handle_client, args.host, args.port,
                                 max_size=None, ping_interval=20):
         await asyncio.Future()
 

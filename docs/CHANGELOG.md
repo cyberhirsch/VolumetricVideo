@@ -34,6 +34,19 @@ prototype. Dates use local project time.
   length updates `STATE.frames`, EasyVolcap's train/val `frame_sample`, and the
   sampler's own `frame_sample` together. This prevents a 300-frame checkpoint
   from being rendered through a stale 1200-frame timeline.
+- Hardened the render server (`tgh_serve.py`) after a code review:
+  - The server now binds `127.0.0.1` by default (new `--host` flag); the
+    websocket `load` command validates that the requested checkpoint resolves
+    under `CKPT_ROOT` (no absolute paths, no `..`/symlink escapes), since
+    `torch.load(weights_only=False)` unpickles arbitrary files.
+  - Checkpoint loads and renders run in worker threads behind a GPU lock so
+    the event loop keeps answering keepalive pings during multi-second loads.
+  - A checkpoint that leaves model keys unfilled now fails the `load` command
+    instead of silently serving a half-loaded model.
+  - `guess_frames` parses the `<N>f` token in checkpoint names instead of
+    relying on a `1200` substring heuristic.
+  - The flow-visualisation quantile subsamples above `2^24` elements to stay
+    under the `torch.quantile` input size limit.
 
 ### Benchmark Notes
 
