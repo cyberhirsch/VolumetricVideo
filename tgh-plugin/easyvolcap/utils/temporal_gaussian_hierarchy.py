@@ -28,6 +28,8 @@ The placement strategy is pluggable (`segmentation`): "uniform" reproduces the
 paper; "adaptive" is reserved for the content-adaptive extension.
 """
 
+import math
+
 import torch
 from torch import nn
 
@@ -55,12 +57,15 @@ class TemporalGaussianHierarchy(nn.Module):
         self.segmentation = segmentation
 
         # s_l = S / 2**l, finest level last
-        seg_len = torch.tensor([root_segment / (2 ** l) for l in range(num_levels)])
+        self.seg_len_py = [root_segment / (2 ** l) for l in range(num_levels)]
+        seg_len = torch.tensor(self.seg_len_py)
         self.seg_len = make_buffer(seg_len)                  # (L,)
 
         # per-Gaussian assignment, (re)sized by assign()
         self.level = make_buffer(torch.zeros(0, dtype=torch.long))     # (N,) in [0, L) or GLOBAL_LEVEL
         self.segment = make_buffer(torch.zeros(0, dtype=torch.long))   # (N,) segment index within its level
+        self._segment_index = None
+        self._global_indices = None
 
         # Allow loading a checkpoint where N differs from the current size
         # (after every densification N grows; on load we just reallocate).
@@ -68,12 +73,28 @@ class TemporalGaussianHierarchy(nn.Module):
 
     @torch.no_grad()
     def _lsd_pre_hook(self, state_dict, prefix, *_):
+        self._segment_index = None
+        self._global_indices = None
         for name in ('level', 'segment'):
             k = f'{prefix}{name}'
             if k in state_dict:
                 buf = getattr(self, name)
                 if buf.shape != state_dict[k].shape:
                     buf.data = buf.data.new_empty(state_dict[k].shape)
+
+    @torch.no_grad()
+    def _rebuild_segment_index(self):
+        """Cache row indices by temporal segment for fast active-set queries."""
+        self._global_indices = (self.level == GLOBAL_LEVEL).nonzero(as_tuple=True)[0]
+        segment_index = {}
+        for level_id in range(self.num_levels):
+            level_rows = (self.level == level_id).nonzero(as_tuple=True)[0]
+            if level_rows.numel() == 0:
+                continue
+            level_segments = self.segment[level_rows]
+            for segment_id in torch.unique(level_segments).tolist():
+                segment_index[(level_id, int(segment_id))] = level_rows[level_segments == segment_id]
+        self._segment_index = segment_index
 
     # --------------------------------------------------------------- placement
     @torch.no_grad()
@@ -121,6 +142,7 @@ class TemporalGaussianHierarchy(nn.Module):
 
         self.level = make_buffer(level)
         self.segment = make_buffer(segment)
+        self._rebuild_segment_index()
         return level, segment
 
     # ----------------------------------------------------------------- queries
@@ -141,7 +163,21 @@ class TemporalGaussianHierarchy(nn.Module):
     @torch.no_grad()
     def active_indices(self, t: float) -> torch.Tensor:
         """Integer indices of Gaussians active at normalized time `t`."""
-        return self.active_mask(t).nonzero(as_tuple=True)[0]
+        if self._segment_index is None or self._global_indices is None:
+            self._rebuild_segment_index()
+
+        pieces = []
+        if self._global_indices.numel() > 0:
+            pieces.append(self._global_indices)
+        empty = self.level.new_empty(0, dtype=torch.long)
+        for level_id, seg_len in enumerate(self.seg_len_py):
+            segment_id = math.floor(t / seg_len)
+            idx = self._segment_index.get((level_id, segment_id), empty)
+            if idx.numel() > 0:
+                pieces.append(idx)
+        if not pieces:
+            return empty
+        return torch.cat(pieces, dim=0)
 
     # ------------------------------------------------------------------- stats
     @torch.no_grad()

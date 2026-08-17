@@ -124,6 +124,22 @@ colour-coded with the Middlebury optical-flow wheel.
 See [`docs/vr-viewing-options.md`](docs/vr-viewing-options.md) for the VR /
 WebXR roadmap.
 
+### Viewing and editing in VoluLab
+
+[VoluLab](https://github.com/cyberhirsch/VoluLab) opens trained checkpoints
+natively: it reads the gaussian and hierarchy tensors straight from the file
+and evaluates the 4D representation itself — client-side rendering, timeline
+scrubbing, and non-destructive editing, with no server and no CUDA. Convert a
+checkpoint once and drag the result into VoluLab:
+
+```bash
+python scripts/export_npz.py <trained>/latest.pt capture.npz --frames 300 --fps 30
+```
+
+The JPEG viewer above remains as the in-training preview path;
+`scripts/gen_parity_fixture.py` records the reference outputs VoluLab's port
+is verified against.
+
 ## Documentation
 
 | Document | Contents |

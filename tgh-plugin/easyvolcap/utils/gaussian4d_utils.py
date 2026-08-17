@@ -158,6 +158,12 @@ class GaussianModel4D(nn.Module):
     def get_features(self):
         return torch.cat((self._features_dc, self._features_rest), dim=1)   # (N, (deg+1)^2, 3)
 
+    def get_features_at(self, indices: torch.Tensor = None):
+        """Return SH features, optionally for a subset of Gaussian rows."""
+        if indices is None:
+            return self.get_features
+        return torch.cat((self._features_dc[indices], self._features_rest[indices]), dim=1)
+
     def oneup_sh_degree(self):
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
@@ -370,18 +376,36 @@ class GaussianModel4D(nn.Module):
         return n_clone, n_split, n_pruned
 
     # ----------------------------------------------------------- 4D covariance
-    def get_cov4(self) -> torch.Tensor:
-        """Full 4D covariance Sigma = R S S^T R^T. Returns (N, 4, 4)."""
-        s = torch.cat([self.get_scaling, self.get_scaling_t], dim=-1)        # (N, 4) std
-        R = build_rotation_4d(self._rotation_l, self._rotation_r)            # (N, 4, 4)
-        S2 = torch.diag_embed(s * s)                                        # (N, 4, 4)
+    def get_cov4(self, indices: torch.Tensor = None) -> torch.Tensor:
+        """Full 4D covariance Sigma = R S S^T R^T. Returns (M, 4, 4).
+
+        When `indices` is provided, all work is restricted to that row subset.
+        This is important for TGH: each iteration only needs the active temporal
+        segments, so building covariance for the full sequence wastes both time
+        and VRAM.
+        """
+        if indices is None:
+            scaling = self._scaling
+            scaling_t = self._scaling_t
+            rotation_l = self._rotation_l
+            rotation_r = self._rotation_r
+        else:
+            scaling = self._scaling[indices]
+            scaling_t = self._scaling_t[indices]
+            rotation_l = self._rotation_l[indices]
+            rotation_r = self._rotation_r[indices]
+
+        s = torch.cat([torch.exp(scaling), torch.exp(scaling_t)], dim=-1)    # (M, 4) std
+        R = build_rotation_4d(rotation_l, rotation_r)                        # (M, 4, 4)
+        S2 = torch.diag_embed(s * s)                                        # (M, 4, 4)
         return R @ S2 @ R.transpose(-1, -2)
 
-    def get_marginal_t(self):
-        """Temporal marginal: mean mu_t (N,1) and variance var_t (N,1) = Sigma_44."""
-        cov4 = self.get_cov4()
-        var_t = cov4[:, 3, 3:4]                                             # (N, 1)
-        return self._t, var_t
+    def get_marginal_t(self, indices: torch.Tensor = None):
+        """Temporal marginal: mean mu_t (M,1) and variance var_t (M,1) = Sigma_44."""
+        cov4 = self.get_cov4(indices)
+        var_t = cov4[:, 3, 3:4]                                             # (M, 1)
+        t = self._t if indices is None else self._t[indices]
+        return t, var_t
 
     @torch.no_grad()
     def get_influence_range(self, o_th: float = 0.05):
@@ -396,39 +420,52 @@ class GaussianModel4D(nn.Module):
         return mu_t - r, mu_t + r, r
 
     # ------------------------------------------------- conditional 3D Gaussian
-    def get_conditional_3d(self, timestamp: float):
+    def get_conditional_3d(self, timestamp: float, indices: torch.Tensor = None):
         """Condition the 4D Gaussians at `timestamp` into 3D Gaussians.
 
         Standard multivariate-normal conditioning with the partition
             Sigma = [[Sigma_xx (3x3), Sigma_xt (3x1)],
                      [Sigma_tx (1x3), Sigma_tt (1x1)]].
 
-        Returns:
-            xyz3 (N, 3)  - conditional 3D means
-            cov6 (N, 6)  - upper-triangular 3D covariance (diff_gauss layout)
-            occ1 (N, 1)  - opacity scaled by the temporal marginal at `timestamp`
-        """
-        cov4 = self.get_cov4()                                              # (N, 4, 4)
-        Sigma_xx = cov4[:, :3, :3]                                          # (N, 3, 3)
-        Sigma_xt = cov4[:, :3, 3:4]                                         # (N, 3, 1)
-        Sigma_tx = cov4[:, 3:4, :3]                                         # (N, 1, 3)
-        Sigma_tt = cov4[:, 3:4, 3:4].clamp_min(1e-12)                       # (N, 1, 1)
-        inv_tt = 1.0 / Sigma_tt                                             # (N, 1, 1)
+        If `indices` is provided, only those Gaussian rows are conditioned.
+        Gradients still scatter back to the selected rows of the original
+        parameter tensors through PyTorch indexing.
 
-        dt = timestamp - self._t                                           # (N, 1)
+        Returns:
+            xyz3 (M, 3)  - conditional 3D means
+            cov6 (M, 6)  - upper-triangular 3D covariance (diff_gauss layout)
+            occ1 (M, 1)  - opacity scaled by the temporal marginal at `timestamp`
+        """
+        if indices is None:
+            xyz = self._xyz
+            t = self._t
+            opacity = self._opacity
+        else:
+            xyz = self._xyz[indices]
+            t = self._t[indices]
+            opacity = self._opacity[indices]
+
+        cov4 = self.get_cov4(indices)                                       # (M, 4, 4)
+        Sigma_xx = cov4[:, :3, :3]                                          # (M, 3, 3)
+        Sigma_xt = cov4[:, :3, 3:4]                                         # (M, 3, 1)
+        Sigma_tx = cov4[:, 3:4, :3]                                         # (M, 1, 3)
+        Sigma_tt = cov4[:, 3:4, 3:4].clamp_min(1e-12)                       # (M, 1, 1)
+        inv_tt = 1.0 / Sigma_tt                                             # (M, 1, 1)
+
+        dt = timestamp - t                                                  # (M, 1)
 
         # conditional mean: mu_xyz + Sigma_xt Sigma_tt^-1 (t - mu_t)
-        shift = (Sigma_xt @ inv_tt)[..., 0] * dt                            # (N, 3)
-        xyz3 = self._xyz + shift
+        shift = (Sigma_xt @ inv_tt)[..., 0] * dt                            # (M, 3)
+        xyz3 = xyz + shift
 
         # conditional covariance: Sigma_xx - Sigma_xt Sigma_tt^-1 Sigma_tx
-        cov3 = Sigma_xx - Sigma_xt @ inv_tt @ Sigma_tx                      # (N, 3, 3)
-        cov6 = strip_symmetric(cov3)                                        # (N, 6)
+        cov3 = Sigma_xx - Sigma_xt @ inv_tt @ Sigma_tx                      # (M, 3, 3)
+        cov6 = strip_symmetric(cov3)                                        # (M, 6)
 
         # temporal marginal opacity factor: exp(-0.5 (t - mu_t)^2 / Sigma_tt)
-        var_t = Sigma_tt[:, :, 0]                                           # (N, 1)
-        opacity_factor = torch.exp(-0.5 * dt * dt / var_t)                  # (N, 1)
-        occ1 = self.get_opacity * opacity_factor                            # (N, 1)
+        var_t = Sigma_tt[:, :, 0]                                           # (M, 1)
+        opacity_factor = torch.exp(-0.5 * dt * dt / var_t)                  # (M, 1)
+        occ1 = torch.sigmoid(opacity) * opacity_factor                      # (M, 1)
 
         return xyz3, cov6, occ1
 

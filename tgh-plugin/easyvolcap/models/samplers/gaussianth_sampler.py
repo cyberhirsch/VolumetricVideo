@@ -242,17 +242,11 @@ class GaussianTHSampler(PointPlanesSampler):
         t = float(time.reshape(-1)[0].item())
 
         # Eq. 7: Gaussians active at this timestamp
-        mask = self.hierarchy.active_mask(t)
-        idx = mask.nonzero(as_tuple=True)[0]
+        idx = self.hierarchy.active_indices(t)
 
         # Sec. 3.2.1: condition the 4D Gaussians into 3D Gaussians at time t
-        xyz3, cov6, occ1 = self.gaussians.get_conditional_3d(t)
-        feat = self.gaussians.get_features                            # (N, (deg+1)^2, 3)
-
-        xyz3 = xyz3[idx]
-        cov6 = cov6[idx]
-        occ1 = occ1[idx]
-        feat = feat[idx]
+        xyz3, cov6, occ1 = self.gaussians.get_conditional_3d(t, indices=idx)
+        feat = self.gaussians.get_features_at(idx)                    # (M, (deg+1)^2, 3)
 
         # view-dependent color via spherical harmonics
         cam_center = (-batch.R[0].mT @ batch.T[0])[..., 0]            # (3,)
