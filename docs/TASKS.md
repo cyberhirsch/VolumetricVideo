@@ -18,10 +18,25 @@ Video / TGH prototype.
   - Separate startup/data-loading time from training-loop time.
   - Record time to 5k, 10k, 15k, 20k, and final 50k.
   - Record peak VRAM and final checkpoint sizes.
+  - Candidate tool: GSPROF (MIT, https://github.com/HAPPYPMN/gsprof, from
+    *From Splats to Silicon*, arXiv 2609.06157) — per-call timings and peak
+    allocated memory including constructed buffers and temporaries, which is
+    the breakdown the VRAM task below needs.
 - [ ] Investigate high VRAM after densification.
   - Confirm how much memory is parameters, Adam state, rasterizer buffers, and
     cached CUDA allocations.
   - Decide whether optimizer-state compression or staged updates are needed.
+  - Try change-gated densification (QuARC-GS §3.5, arXiv 2608.18285): only
+    densify where content genuinely changes over time, not in static regions
+    that merely have high error. Per Gaussian,
+    `g_i = ‖∇_{x_i} (L1(Î, I_t) − L1(Î, I_{t−1}))‖₂`, normalised to
+    `w_i = g_i / (g_i + median(g))`; multiply the accumulated densification
+    gradient by `w_i` before clone/split. No second render — one extra
+    backward with a different image gradient, on a subset of views.
+  - Gate only the finer temporal segments: the root/global segment carries the
+    static background, which this rule would otherwise stop densifying.
+  - Measure against the 50k baseline (1.48M Gaussians after 145
+    densification events).
 - [ ] Add regression tests for the TGH active-set path.
   - Segment index rebuild after `assign()`.
   - Cache invalidation after checkpoint load.
@@ -34,6 +49,11 @@ Video / TGH prototype.
   - RAM: nearby segments and recently used inactive splats.
   - SSD: cold temporal segments and static/background partitions not needed for
     the current training window.
+  - Reference for the unit of residency: ATGS §3.1–3.3 (ToG 2026, arXiv
+    2608.30184). Training updates only the anchors and temporal grids of the
+    current timestamp; rendering uses a fixed window of W = 7 keyframes; each
+    temporal grid is a bounded hash table (2^16 entries). The working set is
+    known and bounded in advance — the property the VRAM/RAM/SSD tiers need.
 - [ ] Prototype streaming at checkpoint/export level before integrating it into
   the live training loop.
 - [ ] Evaluate differentiable hardware rasterization options.
