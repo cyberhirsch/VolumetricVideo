@@ -38,7 +38,7 @@ scope — see [`docs/reproduction-methodology.md`](docs/reproduction-methodology
 │   ├── configs/...                3 config files
 │   └── install.sh                 deploys the plugin into an EasyVolcap clone
 ├── docs/                          documentation (see index below)
-│   └── papers/                    21 reference PDFs (not tracked — heavy)
+│   └── papers/                    32 reference PDFs (not tracked — heavy)
 ├── tgh_serve.py                   WebSocket render server (live viewer backend)
 ├── tgh_viewer.html                browser client for the live viewer
 ├── serve.sh                       launches tgh_serve.py
@@ -149,7 +149,7 @@ is verified against.
 | [`docs/limitations-and-extensions.md`](docs/limitations-and-extensions.md) | Paper limitations, 2025–2026 related work, extension directions |
 | [`docs/vr-viewing-options.md`](docs/vr-viewing-options.md) | Options for viewing the result in VR |
 | [`docs/concept-paper.md`](docs/concept-paper.md) | Funding concept paper (German) |
-| `docs/papers/` | 21 reference papers as PDFs (not tracked — ~400 MB) |
+| `docs/papers/` | 32 reference papers as PDFs (not tracked — ~540 MB) |
 
 ## Data and results
 

@@ -47,6 +47,27 @@ literature. The papers below all build on top of (or directly extend) 4D
 Gaussian Splatting for dynamic / long volumetric video. PDFs of all of them
 are mirrored in [`papers/`](papers/) next to this file.
 
+A second pass in October 2026 added the entries marked *(Oct 2026 pass)*.
+Two of them move the assessment in §4 and §5: SAGA, which already splits
+time adaptively (for a codec), and ATGS, a direct long-sequence competitor
+evaluated on the same benchmark as this reproduction.
+
+### Long-sequence representation (direct competitors)
+
+- **ATGS — *Anchored Temporal Gaussian Splatting for Long Volumetric Video
+  Representation***. ACM ToG 45(4), Article 110 (SIGGRAPH 2026). arXiv
+  [2608.30184](papers/ATGS_2026_arXiv2608.30184.pdf); code at
+  [WuJH2001/ATGS](https://github.com/WuJH2001/ATGS). *(Oct 2026 pass)*
+  Time-conditioned anchors initialised from keyframes, decoded through
+  temporal feature grids within a sliding query window. Positions itself
+  explicitly against TGH ("LongVolCap … degrades under complex and fast
+  changing motions") and evaluates on **N3DV Flame Salmon** — the benchmark
+  of this reproduction — plus VRU, MeetRoom and TGH's own SelfCap data.
+  Worth noting for §5: its keyframes are **periodically sampled**, and their
+  count is **set by hand per scene according to motion magnitude** (K = 15 on
+  N3DV, K = 250 on VRU). The temporal granularity problem TGH has with fixed
+  cuts is still being solved by manual tuning in 2026.
+
 ### Compression and storage
 
 - **4D-MoDe — *Motion-Decoupled 4D Gaussian Compression for Editable and
@@ -76,6 +97,27 @@ are mirrored in [`papers/`](papers/) next to this file.
   Gaussians into video-codec-compatible UV atlases; scales to 30-min
   sequences; ships a 100-sequence / 2-billion-frame dataset.
 
+- **SAGA — *Gaussian Splatting-based Volumetric Video Compression with
+  Sparse 4D Anchors***. NeurIPS 2026. arXiv
+  [2609.33969](papers/SAGA_2026_arXiv2609.33969.pdf). *(Oct 2026 pass)*
+  A codec over a **hierarchical sparse 4D anchor scaffold**: candidate
+  anchors are inserted into a quantised 4D Morton tree, nodes are split
+  greedily by importance-weighted descriptor variance, and — the part that
+  matters here — **temporal splitting is applied only where temporal
+  variance is large**, leaving broad temporal support in static regions.
+  This is content-adaptive subdivision of time, done for compression. The
+  importance score it splits on combines normalised opacity, multi-view
+  visibility, photometric residual and accumulated gradient magnitude.
+
+- **QuARC-GS — *Quantized Anchored Residual Coding for Compact Dynamic
+  Scene Streaming with Gaussian Splatting***. arXiv
+  [2608.18285](papers/QuARCGS_2026_arXiv2608.18285.pdf), Aug 2026; code at
+  [high-performance-computational-optics/QuARC-GS](https://github.com/high-performance-computational-optics/QuARC-GS).
+  *(Oct 2026 pass)* Online free-viewpoint-video streaming for longer
+  sequences via quantised residuals on anchors. Cites TGH as the
+  long-sequence reference; another entry in the residual-coding direction
+  (§4 #5).
+
 ### Streaming and online reconstruction
 
 - **ReCon-GS — *Continuum-Preserved Gaussian Streaming for Fast and Compact
@@ -100,6 +142,23 @@ are mirrored in [`papers/`](papers/) next to this file.
   Distils temporally consistent priors from a test-time-adapted video
   diffusion model — directly addresses the paper's sparse-view limitation.
 
+- **4C4D — *4 Camera 4D Gaussian Splatting***. CVPR 2026. arXiv
+  [2604.04063](papers/4C4D_2026_arXiv2604.04063.pdf). *(Oct 2026 pass)*
+  High-fidelity 4DGS from **four portable cameras, without a diffusion
+  prior**. The insight is that geometry, not appearance, is what fails
+  under sparse views; a neural decaying function on Gaussian opacities
+  shifts the gradients toward geometric learning. Far cheaper than the
+  VDEGaussian route.
+
+- **Sparse-View 4D Gaussian Splatting via Spatiotemporal Priors and
+  Generative Assistance**. SIGGRAPH Asia 2026 Workshops. arXiv
+  [2610.04606](papers/SparseView4DGS_SAVVC_2026_arXiv2610.04606.pdf).
+  *(Oct 2026 pass)* Winning entry (30.04 dB full-frame PSNR) of the
+  **Sparse-View Track of the SIGGRAPH Asia 2026 Volumetric Video
+  Challenge** — six wide-baseline cameras. Mask-guided initialisation and
+  densification plus spatiotemporal priors. Mainly useful as a pointer: the
+  challenge is a ready-made public benchmark for sparse capture.
+
 ### Differentiable hardware rasterization (the direction we missed)
 
 - **Yuan & He — *Efficient Differentiable Hardware Rasterization for 3D
@@ -112,6 +171,48 @@ are mirrored in [`papers/`](papers/) next to this file.
   3DGS / MipNeRF360. Explicitly limited to static 3DGS in scope; future
   work section mentions 2DGS and mobile deployment, but not 4D / dynamic
   variants.
+
+- **From Splats to Silicon — *Rethinking Computational Efficiency of
+  3DGS***. arXiv [2609.06157](papers/SplatsToSilicon_2026_arXiv2609.06157.pdf),
+  Sep 2026. *(Oct 2026 pass)* A systems survey and measurement study. Its
+  hardware section covers the programmable-blending backward line (DHR),
+  VR-Pipe, RayGS and NPU mappings — **none of it addresses 4D / dynamic
+  Gaussians**, so §4 #2 stays open as of this pass. Ships **GSPROF**, an
+  MIT-licensed profiling toolkit
+  ([HAPPYPMN/gsprof](https://github.com/HAPPYPMN/gsprof)), directly usable for
+  the benchmark-harness task.
+
+### Pruning and importance (VRAM after densification)
+
+All three target static 3DGS; listed because the "high VRAM after
+densification" task needs a way to drop Gaussians without re-rendering
+every view. Applying them to TGH means scoring per segment and handling the
+time dimension. *(Oct 2026 pass)*
+
+- **REFINE — *Super-efficient 3D Gaussian Splatting Pruning via
+  Rendering-Free Primitive Importance***. arXiv
+  [2606.09074](papers/REFINE_2026_arXiv2606.09074.pdf), Jun 2026. Importance
+  from an analytically approximated, rendering-aware Hessian field — no
+  rendering pass needed.
+- **RAP — *Fast Feedforward Rendering-Free Attribute-Guided Primitive
+  Importance Score Prediction for Efficient 3D Gaussian Splatting
+  Processing***. CVPR 2026. arXiv
+  [2602.19753](papers/RAP_2026_arXiv2602.19753.pdf); code at
+  [yyyykf/RAP](https://github.com/yyyykf/RAP). Predicts importance from
+  primitive attributes alone with a small feed-forward network.
+- **NanoGS — *Training-Free Gaussian Splat Simplification***. ECCV 2026.
+  arXiv [2603.16103](papers/NanoGS_2026_arXiv2603.16103.pdf).
+  Simplification without retraining and without calibrated images.
+
+### Web viewing
+
+- **WebSplatter — *Enabling Cross-Device Efficient Gaussian Splatting in Web
+  Browsers via WebGPU***. arXiv
+  [2602.03207](papers/WebSplatter_2026_arXiv2602.03207.pdf), Feb 2026.
+  *(Oct 2026 pass)* WebGPU rendering pipeline with a wait-free hierarchical
+  radix sort that works around WebGPU's missing global atomics, plus
+  opacity-aware culling before rasterization. Relevant to
+  `tgh_viewer.html` if it moves to WebGPU.
 
 ### Background, for self-containment
 
@@ -136,12 +237,13 @@ existing `TemporalGaussianHierarchy` / `GaussianTHSampler` plugin, and
 
 | # | Direction | Addresses | Closest prior 2025–2026 work | Remaining novelty | Tractability on 3090 |
 |---|---|---|---|---|---|
-| 1 | **Content-adaptive *temporal segment* boundaries for TGH** — replace the fixed `s_l = S/2^l` cuts with a motion-driven recursive split of the time axis (KD/BVH-style) | #3, #7 | ReCon-GS does dynamic hierarchy reconfiguration but for **anchor** positions, not for TGH's binary temporal partition; 4DGCPro does motion-aware *grouping* without changing TGH's cut rule | **Medium-high** — the specific algorithmic move (varying-length segment boundaries inside the TGH structure) is still open | High — pure algorithmic change, our `segmentation` arg already pluggable |
-| 2 | **Differentiable hardware rasterization for 4D / dynamic scenes** — port the Yuan & He (May 2025) Vulkan programmable-blending backward pass from static 3DGS to 4D Gaussian Splatting with TGH-style temporal hierarchy | #1, #6 | **Yuan & He 2025** covers the *static-3DGS* case end-to-end. They explicitly leave 2DGS and mobile as future work; **4D / dynamic Gaussians are not addressed**. | **Low–medium** — engineering extension of an existing technique, not an algorithmic original contribution. Honest framing: *application paper*, not method paper. | Medium-hard — Vulkan/GLSL work + interaction with TGH active-subset streaming |
-| 3 | **Online / streaming TGH** — append segments to the existing hierarchy as new frames arrive | new capability | ReCon-GS (anchor-based), Instant Gaussian Stream (per-frame) — both stream, neither in the TGH structure | **Medium** — engineering contribution rather than research novelty; still useful as a feature | High — natural fit |
+| 1 | **Content-adaptive *temporal segment* boundaries for TGH** — replace the fixed `s_l = S/2^l` cuts with a motion-driven recursive split of the time axis (KD/BVH-style) | #3, #7 | ReCon-GS does dynamic hierarchy reconfiguration but for **anchor** positions, not for TGH's binary temporal partition; 4DGCPro does motion-aware *grouping* without changing TGH's cut rule. *(Oct 2026)* **SAGA** splits a 4D Morton tree by variance and splits *in time* only where temporal variance is large — adaptive temporal subdivision, but of a **codec scaffold**, not of the hierarchy that decides which Gaussians are resident during training and rendering. **ATGS** still uses periodic keyframes with a hand-set count (K = 15 on N3DV, 250 on VRU). | **Medium** (was medium-high) — the move inside TGH's training-time hierarchy is still open, but SAGA has made variance-driven temporal splitting a published idea; the contribution must be framed around residency / VRAM, not representation | High — pure algorithmic change, our `segmentation` arg already pluggable |
+| 2 | **Differentiable hardware rasterization for 4D / dynamic scenes** — port the Yuan & He (May 2025) Vulkan programmable-blending backward pass from static 3DGS to 4D Gaussian Splatting with TGH-style temporal hierarchy | #1, #6 | **Yuan & He 2025** covers the *static-3DGS* case end-to-end. They explicitly leave 2DGS and mobile as future work; **4D / dynamic Gaussians are not addressed**. *(Oct 2026)* The *From Splats to Silicon* survey's hardware section confirms nothing on the hardware path covers 4D yet. | **Low–medium** — engineering extension of an existing technique, not an algorithmic original contribution. Honest framing: *application paper*, not method paper. | Medium-hard — Vulkan/GLSL work + interaction with TGH active-subset streaming |
+| 3 | **Online / streaming TGH** — append segments to the existing hierarchy as new frames arrive | new capability | ReCon-GS (anchor-based), Instant Gaussian Stream (per-frame) — both stream, neither in the TGH structure. *(Oct 2026)* QuARC-GS streams longer FVV with anchored residual coding — also outside the TGH structure. | **Medium** — engineering contribution rather than research novelty; still useful as a feature | High — natural fit |
 | 4 | **Differentiable `fast_gauss` specifically** — backward pass for the dendenxu OpenGL geometry-shader rasterizer | #1, #6 | **Yuan & He 2025** covers the same idea in a *different graphics API* (Vulkan vs. OpenGL). The `fast_gauss`-specific OpenGL port would now be a *parallel implementation* of an already-published technique. | **Very low** — superseded except for niche OpenGL-only contexts | Medium-hard |
-| 5 | **Inter-segment compression (P-frame-style residual coding)** | #5 | **4D-MoDe** (Sep 2025) does adaptive GOP keyframe insertion; 4DGCPro does hierarchical bitstream layering | **Low** — superseded | Medium |
-| 6 | **Diffusion prior for sparse views** | #2 | **VDEGaussian** (Aug 2025) | **Low** — superseded | Hard — needs video diffusion + significant compute |
+| 5 | **Inter-segment compression (P-frame-style residual coding)** | #5 | **4D-MoDe** (Sep 2025) does adaptive GOP keyframe insertion; 4DGCPro does hierarchical bitstream layering. *(Oct 2026)* SAGA (hierarchical 4D anchors with long-context entropy model), QuARC-GS (anchored residuals) | **Low** — superseded, more so after this pass | Medium |
+| 6 | **Sparse-view 4D reconstruction** — diffusion or geometry prior | #2 | **VDEGaussian** (Aug 2025) via video diffusion. *(Oct 2026)* **4C4D** (CVPR 2026) reaches four cameras *without* diffusion, by biasing 4DGS toward geometry; the SIGGRAPH Asia 2026 Volumetric Video Challenge now has a six-camera sparse-view track | **Low** — superseded on both routes | **Medium** (was hard) — the 4C4D route needs no diffusion model, so it is now 3090-tractable as a baseline or integration; the challenge track is a ready benchmark |
+| 7 | **Per-segment importance pruning to bound VRAM after densification** *(Oct 2026)* | #5, TASKS "high VRAM after densification" | REFINE (rendering-free Hessian importance), RAP (CVPR 2026, feed-forward importance from attributes), NanoGS (ECCV 2026, training-free) — all static 3DGS | **Low–medium** — adapting known pruning to 4D primitives and TGH segments; useful engineering, not a publication anchor | High — post-processing per segment, no change to training |
 
 ---
 
@@ -163,6 +265,26 @@ straightforward* (the `segmentation` argument on
 `TemporalGaussianHierarchy` is already a plug-in slot waiting for an
 `"adaptive"` implementation).
 
+**October 2026 re-check.** The direction survives, with a narrower claim.
+SAGA (NeurIPS 2026) already splits time adaptively — by temporal variance,
+inside a 4D Morton tree — but for a compression scaffold over a trained
+representation. What remains open is the adaptive partition of TGH's own
+hierarchy, the structure that decides which Gaussians are resident while
+training and rendering. Three consequences:
+
+1. **Cite SAGA and frame the contribution around residency and VRAM**, not
+   around "adaptive temporal splitting" as such — that phrase alone is now
+   taken.
+2. **SAGA's split score is a ready candidate criterion**: normalised
+   opacity, multi-view visibility, photometric residual and accumulated
+   gradient magnitude. It gives the adaptive strategy a defensible first
+   version instead of an invented heuristic.
+3. **ATGS becomes the baseline to beat.** It evaluates on Flame Salmon like
+   this reproduction, its code is public, and its hand-set keyframe count
+   (15 vs. 250 depending on scene motion) is the motivating example: a
+   17× difference in temporal granularity that an adaptive scheme should
+   find on its own.
+
 **Secondary candidate: differentiable hardware rasterization extended to
 4D / dynamic Gaussians.**
 
@@ -180,11 +302,18 @@ integration paper*, not a method paper.
 - The originally-planned differentiable `fast_gauss` is essentially
   superseded by Yuan & He — porting their idea from Vulkan to OpenGL is
   not a research contribution.
-- Inter-segment compression and diffusion-sparse-view remain superseded
-  by 4D-MoDe / VDEGaussian.
+- Inter-segment compression remains superseded — by 4D-MoDe, and now also
+  by SAGA and QuARC-GS.
+- Sparse views remain superseded as research: VDEGaussian on the diffusion
+  route, and now 4C4D (CVPR 2026) on a cheap non-diffusion route with four
+  cameras. 4C4D is worth keeping as a baseline should sparse capture become
+  a goal.
+- Per-segment pruning (§4 #7) is worth doing for the VRAM problem, but as
+  engineering rather than as a research anchor.
 
 **Plan implication.** No change to the reproduction critical path. Once
 the long training run is verified, the next research move is the
-content-adaptive segmentation strategy. The Yuan-style 4D backward
+content-adaptive segmentation strategy, with ATGS added as a comparison
+baseline. The Yuan-style 4D backward
 remains attractive as a system contribution — useful for the
 implementation, less useful as a publication anchor.
